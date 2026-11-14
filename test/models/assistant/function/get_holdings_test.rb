@@ -1,6 +1,8 @@
 require "test_helper"
 
 class Assistant::Function::GetHoldingsTest < ActiveSupport::TestCase
+  include EntriesTestHelper
+
   setup do
     @user = users(:family_admin)
     @fn = Assistant::Function::GetHoldings.new(@user)
@@ -32,6 +34,47 @@ class Assistant::Function::GetHoldingsTest < ActiveSupport::TestCase
 
   test "get_holdings without a security filter is unchanged" do
     assert_equal [ "AAPL", "MSFT" ], tickers({})
+  end
+
+  test "get_holdings leaves out a position whose newest row is zero" do
+    msft = securities(:msft)
+    @account.holdings.create!(security: msft, date: 1.day.ago.to_date, qty: 5, price: 400, amount: 2000, currency: "USD")
+    @account.holdings.find_by!(security: msft, date: Date.current).update!(qty: 0, amount: 0)
+
+    assert_equal [ "AAPL" ], tickers({})
+  end
+
+  test "get_holdings reports the same average cost as the holdings page on a provider-linked account" do
+    account = @user.family.accounts.create!(
+      name: "Linked Brokerage", balance: 20000, cash_balance: 4000, currency: "USD",
+      accountable: Investment.new, owner: @user
+    )
+    # Any provider works; it only makes the holding a provider row.
+    provider_item = @user.family.coinstats_items.create!(name: "CoinStats", api_key: "test-key")
+    provider_account = provider_item.coinstats_accounts.create!(name: "Provider", currency: "USD")
+    account_provider = AccountProvider.create!(account: account, provider: provider_account)
+
+    security = Security.create!(ticker: "REPRO", name: "Repro Security")
+    (5.days.ago.to_date..Date.current).each do |date|
+      Security::Price.create!(security: security, date: date, price: 400)
+    end
+
+    # The provider dates its snapshot yesterday: 40 shares at an average cost of 200.
+    account.holdings.create!(
+      security: security, date: 1.day.ago.to_date, qty: 40, price: 400, amount: 16000, currency: "USD",
+      cost_basis: 200, cost_basis_source: "provider", account_provider: account_provider
+    )
+    # The imported trades explain only 10 of the 40 shares, so the calculated
+    # row the materializer writes for today averages 350.
+    create_trade(security, account: account, qty: 10, price: 350, date: 3.days.ago.to_date)
+    Holding::Materializer.new(account, strategy: :reverse).materialize_holdings
+
+    page_holding = account.reload.current_holdings.find_by!(security: security)
+    tool_holding = @fn.call("page" => 1)[:holdings].find { |holding| holding[:ticker] == "REPRO" }
+
+    assert_equal 200.0, page_holding.avg_cost.amount.to_f
+    assert_equal page_holding.avg_cost.amount.to_f, tool_holding[:average_cost]
+    assert_equal page_holding.date, tool_holding[:date]
   end
 
   private

@@ -131,13 +131,11 @@ class Assistant::Function::GetHoldings < Assistant::Function
         accounts = accounts.where(name: params["accounts"])
       end
 
-      holdings = Holding.where(account: accounts)
-        .where(
-          id: Holding.where(account: accounts)
-            .select("DISTINCT ON (account_id, security_id) id")
-            .where.not(qty: 0)
-            .order(:account_id, :security_id, date: :desc)
-        )
+      # The rows each account's Holdings tab shows, so the quantity and average
+      # cost match it. On a provider-linked account these are the provider rows
+      # on the latest snapshot date. The newest row there can be a calculated
+      # one dated today, whose cost basis covers only the imported trades.
+      holdings = Holding.where(id: accounts.flat_map { |account| account.current_holdings.ids })
 
       if params["securities"].present?
         holdings = holdings.joins(:security).where(securities: { ticker: params["securities"] })
